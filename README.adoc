@@ -1,0 +1,576 @@
+= DomainConnectApplyZone
+
+== Introduction
+
+This module implements the logic for applying a Domain Connect template to a zone.
+
+Given a zone's contents, a domain/host (subdomain), a template (identified by a
+providerId/serviceId), variable values, and additional parameters; the
+library will calculate changes to the zone.
+
+Authorization of the user, verification that the user owns the domain, and the UX to
+gain consent from the user are left to the DNS Provider. But all the logic for handling
+the application of the template, including conflict detection, parameter processing,
+signature verification and more are handled in this library.
+
+The library works by taking as canonical input the current content of the zone file
+corresponding to the domain name being processed. And it returns the modified zone file
+in the same canonical format. It is up to the implementation to translate to and from
+this canonical format.
+
+Some DNS Providers only apply templates to a zone at run-time. After the zone is applied
+the records in the zone have no indication they were applied by a template. Other DNS
+Providers remember the records that were applied by a template, providing advanced features
+in their UX.
+
+This library can deal with both types of DNS Providers. If a DNS Provider wishes to remember
+template state in its zone, it simply needs to read/write this additional state with the records.
+
+== Installation
+
+The package can be installed from PyPi
+[source,shell]
+----
+pip install domainconnectzone
+----
+
+To install from teh source code repository execute:
+
+[source,shellscript]
+----
+python setup.py build
+python setup.py install
+----
+
+== Usage
+
+=== DomainConnect class
+
+This is a Python module and corresponding class that can handle applying a
+template to a zone of records.
+
+The object is initialized with a providerId, serviceId, and templateDir.
+
+[source,python]
+----
+from domainconnectzone import DomainConnect
+dc = DomainConnect("<provider_id>", "<service_id>", "<template_dir>")
+----
+
+The provider id and service id map to the template name. Templates can be found
+in the GitHub project at https://github.com/Domain-Connect/templates. Individual
+template files are named `<service_id>.<provider_id>.json`.
+
+The location of the templates are a parameter to the object.
+
+If the template cannot be found, an InvalidTemplate exception is thrown.
+
+There are several other methods on this class/object.
+
+==== apply_template(...)
+
+The first (and more common) method is to apply changes to a zone based on the
+template.
+
+Input takes a list of records that exist in the zone, the domain, the host, and
+additional parameters for the template as a dictionary of key/value pairs.
+It optionally takes a query string, sig, and key to verify the signature. And an
+optional flag indicating if the DNS Provider is multi-template-aware.
+
+===== Parameters
+
+[%header,cols=3*]
+|===
+|Parameter
+|Type
+|Description
+
+|*Zone Records*
+|[{}]
+|This is the list of records representing the zone. It is described below.
+
+|*Domain*
+|string
+|This is the domain name. It matches the domain of the zone, and the domain
+the template will be applied to.
+
+|*Host*
+|string
+|This is the host or subdomain. It can be None.
+
+|*Group Ids*
+|[string,]
+|(optional) This is a list of groups to apply. If None or empty, the entire template will be applied.
+
+|*Query String (qs)*
+|string
+|(optional) This is the query string used for signature verification. It should match the entire
+query string, properly URL Encoded, without the sig or key values. This defaults to None.
+
+|*Signature (sig)*
+|string
+|(optional) This is the signature. This defaults to None.
+
+|*Key (key)*
+|string
+|(optional) This is the key into DNS on syncPubKeyDomain to read the public key for signature verification.
+This defaults to None.
+
+|*Ignore Signature (ignore_signature) *
+|Boolean
+|(optional) This tells the system to ignore any signature verification. Extreme care should be taken with this parameter, as
+it is largely intended for internal tooling and testing. This defaults to False.
+
+|*Multi Template Aware (multi_aware) *
+|Boolean
+|(optional) This tells the system that the DNS Provider wishes to engage the multi-template processing. It defaults to False.
+|===
+
+
+===== Example
+
+[source,python]
+----
+import domainconnectzone
+dc = domainconnectzone.DomainConnect("exampleservice.domainconnect.org", "template1")
+
+zone_records = [...] # List of records in the zone
+domain = 'example.com'
+host = None
+params = {'IP': '132.148.25.185', 'RANDOMTEXT': 'shm:1553436765:Hello'}
+
+dc.apply_template(zone_records, domain, host, params)
+----
+
+Upon success this method returns a tuple containing three lists of zone records.
+
+The first is the list new records being added.
+
+Second is the list of records to be deleted.
+
+The third is the list of final (complete) records that should be written to the zone.
+
+Calling this function can throw any of a number of exceptions.
+
+===== Exceptions
+
+[%header,cols=2*]
+|===
+|Exception
+|Description
+
+|*HostRequired*
+|This is raised when the template requires a host, but no host (subdomain) is provided
+
+|*InvalidSignature*
+|This is raised when the template requires a signature and verification fails.
+
+|*MissingParameter*
+|This is raised when the template requires a parameter that wasn't passed in.
+
+|*InvalidData*
+|This is raised when invalid data is passed into the template. Usually this is a
+parameter that results in malformed DNS data.
+|===
+
+==== data
+
+This attribute returns the template in json form.
+
+==== is_signature_required
+
+This attribute returns True if the template requires signatures, False if not.
+
+==== Records
+
+Records passed into and returned from the Apply method represent DNS records. These
+are implemented using a simple list of dictionary, with each dictionary representing a
+DNS record.
+
+All records have a type (A, AAAA, CNAME, NS, TXT, MX, or SRV). Depending on the type there
+are other attributes.
+
+If the DNS Provider wishes to implement template state in DNS, a set of fields is required
+in this data structure. This will be a dictionary. It is recommended that the DNS Provider
+store this by serializing the dictionary into a string.
+
+[%header,cols=3*]
+|===
+|Field
+|Type
+|Description
+
+|*type*
+|string
+|This is one of A, AAAA, CNAME, NS, TXT, MX, or SRV. 
+
+|*name*
+|string
+|This is the name/host of the record. This exists for all types. They must contain data
+that is relative to the root zone. For example, in the domain foo.com the name for the resolution
+of www.bar.foo.com would contain "www.bar". A value of @ or None would indicate the apex.
+
+|*data*
+|string
+|This is the data for the record. This exists for all types. When the data contains
+a domain/host a fully qualified domain name without a trailing dot must be used.
+
+|*ttl*
+|int
+|This is the TTL for the record. This exists for all types.
+
+|*priority*
+|int
+|This is the priority of an MX record or SRV record.
+
+|*protocol*
+|string
+|This is the protocol for an SRV record. This must be the value TCP or UDP.
+
+|*service*
+|string
+|This is the service of an SRV record.
+
+|*weight*
+|int
+|This is the weight of the SRV record.
+
+|*port*
+|int
+|This is the port of the SRV record.
+
+|*_dc*
+|json
+|(optional) This is the json structure representing the template state for applied records. The
+DNS Provider should store this by serializing/deserialzing the json, allowing for future extensibility.
+Fields in here are interesting to the DNS Provider and are documented below.
+
+|*_dc.id*
+|String
+|This is the unique id representing the application of a template
+
+|*_dc.providerId*
+|String
+|This is the providerId of the applied template on this record
+
+|*_dc.serviceId*
+|String
+|This is the serviceId of the applied template on this record
+
+|*_dc.host*
+|String
+|This was the host used to apply this template. All templates are scoped to the domain/host.
+
+|*_dc.essential*
+|String
+|Largely internal, this indicates that the essential property on the record when applied. This
+is used for conflict detection when overwriting.
+
+|===
+
+An example zone:
+
+[source,json]
+----
+[
+    {"type": "A","name": "@","data": "127.0.0.1","ttl": 3000},
+    {"type": "CNAME","name": "www","data": "@","ttl": 3000}
+]
+----
+
+==== verify_sig()
+
+In addition to being used by the apply_template method, this independent method can be used to 
+validate a query string against a signature and key.
+
+[source,python]
+----
+import domainconnectzone
+dc = domainconnectzone.DomainConnect('exampleservice.domainconnect.org', 'template2')
+sig = 'LyCE+7H0zr/XHaxX36pdD1eSQENRiGTFxm79m7A5NLDPiUKLe71IrsEgnDLN76ndQcLTZlr4+HhpWzKZKyFl9ieEpNzZlDHRp35H83Erhm0eDctUmI1Zct51alZ8RuTL+aa29WC+AM7+gSpnL/AHl9mxckyeEuFFqXcl/3ShwK2F9x/7r+cICefiUEzsZN3EuqOvwqQkBSqcdVy/ohjNAG/InYAYSX+0fUK9UNQfQYkuPqOAptPRjX+hUnYsXUk/eQq16aX7TzhZm+eEq+En+oiEgh7qps1yvGbJm6QXKovan/sqng40R6FBP3R3dvfZC6QrfCUtGpQ8c0D0S5oLBw=='
+
+key = '_dck1'
+qs = 'domain=arnoldblinn.com&RANDOMTEXT=shm%3A1551036164%3Ahello&IP=132.148.25.185&host=bar'
+
+dc.verify_sig(qs, sig, key)
+----
+
+If the signature fails, an InvalidSignature exception is raised
+
+==== prompt
+
+This method is useful for testing. It will prompt the user for all values for all
+variables in the template. These are added as key/values in a dictionary
+suitable for passing into the Apply function.
+
+[source,python]
+----
+import domainconnectzone
+dc = domainconnectzone.DomainConnect("example.com", "foo")
+params = dc.prompt()
+----
+
+=== DomainConnectTemplates Class
+
+==== Overview
+
+The `DomainConnectTemplates` class is used to manage and validate DNS templates for Domain Connect. It handles loading, validating, creating, updating, and retrieving templates, ensuring that the templates conform to a specific schema and rules.
+
+==== Initialization
+
+You can initialize the `DomainConnectTemplates` class with or without a custom template directory path.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+# Initialize with the default template path
+templates = DomainConnectTemplates()
+
+# Initialize with a custom template path
+templates = DomainConnectTemplates('/path/to/custom/templates')
+----
+
+If no path is provided, the class uses the default template directory located in the same directory as the class file.
+
+==== Properties
+
+===== schema
+
+The `schema` property returns the JSON schema used for validating templates, or `None` if no schema is found.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+templates = DomainConnectTemplates()
+schema = templates.schema
+----
+
+===== templates
+
+The `templates` property returns a list of available templates in the template directory. Each template is represented as a dictionary containing `providerId`, `serviceId`, `fileName`, and the template's JSON content.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+templates = DomainConnectTemplates()
+available_templates = templates.templates
+----
+
+==== Methods
+
+===== validate_template(template)
+
+Validates a given template against the schema and various rules, including checking for valid domain names and ensuring that certain fields do not contain variables.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+template = {
+  "providerId": "exampleservice.domainconnect.org",
+  "providerName": "Example Domain Connect Service",
+  "serviceId": "test",
+  "serviceName": "Test",
+  "version": 1,
+  "records": [
+    {
+      "type": "TXT",
+      "host": "@",
+      "data": "%test%",
+      "ttl": 1800
+    }
+  ]
+}
+
+templates = DomainConnectTemplates()
+templates.validate_template(template)
+----
+
+If the template is invalid, it raises an `InvalidTemplate` or `InvalidData` exception.
+
+===== update_template(template)
+
+Updates an existing template in the template directory after validating it. The template is identified by its `providerId` and `serviceId`.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+template = {
+    ...
+}
+
+templates = DomainConnectTemplates()
+templates.update_template(template)
+----
+
+Raises an `InvalidTemplate` exception if the template does not exist, or an `EnvironmentError` if the template directory is not writable.
+
+===== create_template(template)
+
+Creates a new template in the template directory after validating it. If a template with the same `providerId` and `serviceId` already exists, it raises an `InvalidTemplate` exception.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+template = {
+    ...
+}
+
+templates = DomainConnectTemplates()
+templates.create_template(template)
+----
+
+Raises an `EnvironmentError` if the template directory is not writable.
+
+===== get_variable_names(template, variables=None, group=None)
+
+Returns a dictionary of variable names and empty or previous values found in the template's records.
+You can optionally pass a `variables` dictionary to provide previous values of the variables or a `group` name to filter variables by group.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+template = {
+    ...
+}
+
+templates = DomainConnectTemplates()
+variable_names = templates.get_variable_names(template)
+----
+
+===== get_group_ids(template)
+
+Returns a list of unique `groupId` values found in the template's records.
+
+[source,python]
+----
+from domainconnectzone import DomainConnectTemplates
+
+template = {
+    ...
+}
+
+templates = DomainConnectTemplates()
+group_ids = templates.get_group_ids(template)
+----
+
+==== Exceptions
+
+The following exceptions can be raised by the `DomainConnectTemplates` class:
+
+* `InvalidTemplate` - Raised when a template is invalid or when certain operations fail.
+* `InvalidData` - Raised when invalid data (e.g., domain names) are detected within a template.
+* `EnvironmentError` - Raised when the template directory is not writable.
+
+==== Example Usage
+
+[source,python]
+----
+# Example: Loading templates and creating a new template
+from domainconnectzone import DomainConnectTemplates
+
+# Initialize the class
+templates = DomainConnectTemplates('./test/templates')
+
+# List available templates
+for template_info in templates.templates:
+    print(template_info)
+
+# Create a new template
+new_template = {
+  "providerId": "exampleservice.domainconnect.org",
+  "providerName": "Example Domain Connect Service",
+  "serviceId": "test",
+  "serviceName": "Test",
+  "version": 1,
+  "records": [
+    {
+      "type": "TXT",
+      "host": "@",
+      "data": "%test%",
+      "ttl": 1800
+    }
+  ]
+}
+
+templates.create_template(new_template)
+variable_names = templates.get_variable_names(new_template)
+print(variable_names)
+----
+
+== Query String Utilities
+
+Several helper functions are included for dealing with query strings.
+
+=== qs2dict(qs, filter=[])
+
+This will convert a query string (qs) of the form a=1&b=2&c=3&d=4 to a dictionary of the form
+`{'a': '1', 'b': '2', 'c': '3', 'd': '4'}`.
+
+This is useful for converting a query string to a dictionary, filtering out the
+values not useful as parameters (e.g. domain, host, sig, key).
+
+[source,python]
+----
+import domainconnectzone
+
+qs = 'a=1&b=2&c=3&d=4'
+params = domainconnectzone.qsutil.qs2dict(qs, ['c', 'd'])
+# params contains {'a': '1', 'b': '2'}
+----
+
+=== qsfilter(qs, filter=[])
+
+This is similar to the above but returns the results as a string.
+
+[source,python]
+----
+import domainconnectzone
+
+qs = 'a=1&b=2&c=3&d=4'
+qs2 = domainconnectzone.qsutil.qsfilter(qs, ['c', 'd'])
+# qs2 contains 'a=1&b=2'
+----
+
+== Unit testing and test coverage
+
+Execute ready shell script
+[source,shell]
+----
+./run_unittests_with_coverage.sh
+----
+
+=== Test
+
+This contains a series of simple tests. Run them by:
+
+[source,python]
+----
+import Test
+Test.run()
+----
+
+=== GDTest
+
+This module is GoDaddy specific. This will prompt the user for domain/host/providerId/serviceId and GoDaddy API Key. It will
+read the template, prompt for all variable values, and apply the changes to the zone. This is done by using the API Key to read
+the entire zone, and write the entire zone.
+
+[source,python]
+----
+import GDTest
+GDTest.run()
+----
+
+
+== Changelog
+
+=== 4.0.0
+- added full test coverage with standard unit tests
+- NEW FUNCTIONALITY: added template repository manipulation class DomainConnectTemplates
